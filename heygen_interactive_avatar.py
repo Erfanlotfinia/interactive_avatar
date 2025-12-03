@@ -1,27 +1,38 @@
 """
-HEYGEN STREAMING AVATAR – LOCAL DEMO SCRIPT (EN + FA)
+HEYGEN STREAMING AVATAR – LOCAL DEMO SCRIPT (multi-lang: fa, en, zh)
 
 What it does:
 1. Reads HEYGEN_API_KEY from environment.
-2. If AVATAR_ID is set, uses that.
-   Otherwise: calls avatar.list and uses the FIRST streaming avatar id.
+2. Chooses avatar/voice based on DEFAULT_LANG in .env:
+   - DEFAULT_LANG=fa    -> FA_AVATAR_ID / FA_VOICE_ID
+   - DEFAULT_LANG=eng   -> EN_AVATAR_ID / EN_VOICE_ID
+   - DEFAULT_LANG=china -> ZH_AVATAR_ID / ZH_VOICE_ID
+   Fallbacks:
+     - AVATAR_ID / VOICE_ID
+     - auto: first streaming avatar.
+
 3. Creates a HeyGen streaming session (avatar + optional voice).
 4. Opens a local HTML page that connects to LiveKit (video/audio).
-5. Sends a static text message (English or Persian) so the avatar reads it.
+5. Sends a static text message (language-dependent) so the avatar reads it.
 
-Usage:
-    pip install requests python-dotenv
-    export HEYGEN_API_KEY="your-key"
+Example .env:
 
-    # optional overrides:
-    # export AVATAR_ID="your-avatar-id"
-    # export VOICE_ID="your-voice-id"
+    HEYGEN_API_KEY=your-key
+    DEFAULT_LANG=fa
 
-    # text / language control:
-    # export DEMO_TEXT="سلام، این یک تست است."
-    # export DEMO_LANG="fa"   # or "en"
+    FA_AVATAR_ID=...
+    FA_VOICE_ID=...
 
-    python heygen_streaming_demo.py
+    EN_AVATAR_ID=...
+    EN_VOICE_ID=...
+
+    ZH_AVATAR_ID=...
+    ZH_VOICE_ID=...
+
+    # Optional overrides:
+    # AVATAR_ID=...
+    # VOICE_ID=...
+    # DEMO_TEXT=custom text...
 """
 
 import os
@@ -29,7 +40,7 @@ import json
 import time
 import tempfile
 import webbrowser
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -184,15 +195,68 @@ class HeyGenStreamingClient:
         return self._handle_response(r)
 
 
+def normalize_lang(env_value: str) -> str:
+    """
+    Map various env values to canonical language codes:
+    - "fa", "fa-ir", "persian" -> "fa"
+    - "en", "eng", "en-us", "en-gb" -> "en"
+    - "zh", "cn", "china", "chinese" -> "zh"
+    """
+    v = (env_value or "").strip().lower()
+    if v in ("fa", "fa-ir", "persian"):
+        return "fa"
+    if v in ("en", "eng", "en-us", "en-gb", "english"):
+        return "en"
+    if v in ("zh", "cn", "china", "chinese", "zh-cn", "zh-hans"):
+        return "zh"
+    # default fallback
+    return "en"
+
+
+def resolve_avatar_voice_from_env(lang: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Choose avatar_id / voice_id according to DEFAULT_LANG.
+    Returns (avatar_id_env, voice_id_env) which may be None.
+    """
+    avatar_id_env = None
+    voice_id_env = None
+
+    if lang == "fa":
+        avatar_id_env = os.getenv("FA_AVATAR_ID")
+        voice_id_env = os.getenv("FA_VOICE_ID")
+    elif lang == "en":
+        avatar_id_env = os.getenv("EN_AVATAR_ID")
+        voice_id_env = os.getenv("EN_VOICE_ID")
+    elif lang == "zh":
+        avatar_id_env = os.getenv("ZH_AVATAR_ID")
+        voice_id_env = os.getenv("ZH_VOICE_ID")
+
+    # Fallback to generic env vars if language-specific ones are not set
+    if not avatar_id_env:
+        avatar_id_env = os.getenv("AVATAR_ID")
+    if not voice_id_env:
+        voice_id_env = os.getenv("VOICE_ID")
+
+    return avatar_id_env, voice_id_env
+
+
 def build_livekit_viewer_html(livekit_url: str, access_token: str, lang: str) -> str:
     """
     Minimal HTML that connects to LiveKit and shows the avatar video.
     Uses livekit-client UMD build from CDN.
-    lang: "fa" or "en" (for <html lang="..."> tag)
+    lang: "fa", "en", or "zh" (for <html lang="..."> tag)
     """
-    html_lang = "fa" if lang == "fa" else "en"
-    title = "دموی آواتار HeyGen" if lang == "fa" else "HeyGen Avatar Streaming Demo"
-    heading = "دموی آواتار استریمینگ" if lang == "fa" else "HeyGen Streaming Avatar Demo"
+    html_lang = "fa" if lang == "fa" else ("zh" if lang == "zh" else "en")
+
+    if lang == "fa":
+        title = "دموی آواتار HeyGen"
+        heading = "دموی آواتار استریمینگ"
+    elif lang == "zh":
+        title = "HeyGen 虚拟形象演示"
+        heading = "HeyGen 实时虚拟形象演示"
+    else:
+        title = "HeyGen Avatar Streaming Demo"
+        heading = "HeyGen Streaming Avatar Demo"
 
     return f"""<!DOCTYPE html>
 <html lang="{html_lang}">
@@ -252,16 +316,7 @@ def build_livekit_viewer_html(livekit_url: str, access_token: str, lang: str) ->
           if (!videoEl.srcObject) {{
             videoEl.srcObject = mediaStream;
           }}
-          if (track.kind === "video") {{
-            mediaStream.addTrack(track.mediaStreamTrack);
-          }}
-          if (track.kind === "audio") {{
-            mediaStream.addTrack(track.mediaStreamTrack);
-          }}
-        }});
-
-        room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {{
-          console.log("Track unsubscribed:", track.kind);
+          mediaStream.addTrack(track.mediaStreamTrack);
         }});
 
         room.on(RoomEvent.Disconnected, () => {{
@@ -287,29 +342,30 @@ def build_livekit_viewer_html(livekit_url: str, access_token: str, lang: str) ->
 """
 
 
-def get_demo_text() -> str:
+def get_demo_text(lang: str) -> str:
     """
     Decide what text the avatar should read.
 
     Priority:
-      1) DEMO_TEXT env var (can be any language, e.g. Persian)
-      2) DEMO_LANG=fa -> default Persian text
-      3) Otherwise -> default English text
+      1) DEMO_TEXT env var (can be any language)
+      2) Default text based on lang ("fa", "en", "zh")
     """
     demo_text_env = os.getenv("DEMO_TEXT")
     if demo_text_env:
         return demo_text_env
 
-    demo_lang = os.getenv("DEMO_LANG", "").lower()
-
-    if demo_lang == "fa":
-        # Default Persian sample
+    if lang == "fa":
         return (
             "سلام، این یک پیام آزمایشی از یک اسکریپت پایتون است. "
             "من یک آواتار هوشمند هستم که متن تولید شده توسط برنامهٔ شما را می‌خوانم."
         )
+    if lang == "zh":
+        return (
+            "你好，这是一条来自 Python 脚本的演示消息。"
+            "我是一个实时虚拟形象，正在朗读你的应用程序生成的文本。"
+        )
 
-    # Default English sample
+    # default English
     return (
         "Hello, this is a demo message from a Python script. "
         "I am a streaming AI avatar reading text generated by your application."
@@ -320,21 +376,23 @@ def main():
     load_dotenv()
 
     api_key = os.getenv("HEYGEN_API_KEY")
-    avatar_id_env = os.getenv("AVATAR_ID")
-    voice_id = os.getenv("VOICE_ID")  # optional
-    demo_lang = os.getenv("DEMO_LANG", "").lower()  # "fa" or "en" or ""
+    raw_default_lang = os.getenv("DEFAULT_LANG", "en")
+    lang = normalize_lang(raw_default_lang)
 
     if not api_key:
         raise RuntimeError("HEYGEN_API_KEY env var is required")
 
     client = HeyGenStreamingClient(api_key)
 
-    # If AVATAR_ID is not explicitly provided, fetch list and pick first
+    # Resolve avatar/voice based on lang
+    avatar_id_env, voice_id = resolve_avatar_voice_from_env(lang)
+
+    # If avatar_id still not set, pick first streaming avatar
     if avatar_id_env:
         avatar_id = avatar_id_env
-        print(f"Using AVATAR_ID from env: {avatar_id}")
+        print(f"Using avatar from env for lang={lang}: {avatar_id}")
     else:
-        print("[*] AVATAR_ID not set in env, fetching streaming avatars...")
+        print("[*] No language-specific AVATAR_ID set, fetching streaming avatars...")
         avatars = client.list_streaming_avatars()
         if not avatars:
             raise RuntimeError("No streaming avatars returned from HeyGen.")
@@ -345,9 +403,9 @@ def main():
         print(f"[+] Using first streaming avatar: {avatar_id}")
 
     print("=== HeyGen Streaming Avatar Local Demo ===")
+    print(f"DEFAULT_LANG={lang} (raw='{raw_default_lang}')")
     print(f"AVATAR_ID={avatar_id}")
-    print(f"VOICE_ID={voice_id or 'default'}")
-    print(f"DEMO_LANG={demo_lang or 'auto'}\n")
+    print(f"VOICE_ID={voice_id or 'default'}\n")
 
     # 1) Create per-session token
     print("[*] Creating streaming session token...")
@@ -377,7 +435,7 @@ def main():
     print("[+] Streaming started.\n")
 
     # 4) Create local HTML viewer and open in browser
-    html = build_livekit_viewer_html(livekit_url, access_token, demo_lang)
+    html = build_livekit_viewer_html(livekit_url, access_token, lang)
     tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".html")
     tmp_file.write(html.encode("utf-8"))
     tmp_file.flush()
@@ -392,8 +450,8 @@ def main():
     print(f"[*] Waiting {wait_for_connect} seconds before sending text to avatar...")
     time.sleep(wait_for_connect)
 
-    # 5) Send demo text (EN/FA/custom) to be read by avatar
-    demo_text = get_demo_text()
+    # 5) Send demo text based on lang
+    demo_text = get_demo_text(lang)
     print("[*] Sending demo text to avatar:")
     print(f'    "{demo_text}"\n')
 
