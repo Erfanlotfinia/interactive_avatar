@@ -11,6 +11,10 @@ from pydantic import BaseModel
 HEYGEN_BASE_URL = "https://api.heygen.com"
 
 
+# ============================================================
+#                   ERROR + CLIENT
+# ============================================================
+
 class HeyGenError(Exception):
     pass
 
@@ -22,23 +26,19 @@ class HeyGenStreamingClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
 
-    # ----- low-level helpers -----
-
     def _api_headers(self) -> Dict[str, str]:
-        # API key auth (create_token, avatar.list)
         return {
             "X-Api-Key": self.api_key,
             "Content-Type": "application/json",
         }
 
     def _streaming_headers(self, session_token: str) -> Dict[str, str]:
-        # Bearer token auth (streaming.new/start/task/stop)
         return {
             "Authorization": f"Bearer {session_token}",
             "Content-Type": "application/json",
         }
 
-    def _handle_response(self, r: requests.Response) -> Any:
+    def _handle_response(self, r: requests.Response):
         try:
             data = r.json()
         except Exception:
@@ -47,47 +47,33 @@ class HeyGenStreamingClient:
             raise HeyGenError(f"HTTP {r.status_code}: {data}")
         return data
 
-    # ----- API methods -----
+    # ============= HeyGen API =============
 
-    def list_streaming_avatars(self) -> List[Dict[str, Any]]:
+    def list_streaming_avatars(self):
         url = f"{self.base_url}/v1/streaming/avatar.list"
-        r = requests.get(url, headers=self._api_headers(), timeout=15)
+        r = requests.get(url, headers=self._api_headers(), timeout=10)
         data = self._handle_response(r)
         return data.get("data", [])
 
-    def create_session_token(self) -> str:
+    def create_session_token(self):
         url = f"{self.base_url}/v1/streaming.create_token"
-        r = requests.post(url, headers=self._api_headers(), timeout=15)
+        r = requests.post(url, headers=self._api_headers(), timeout=10)
         data = self._handle_response(r)
-        if data.get("error"):
-            raise HeyGenError(f"Create token error: {data}")
         token = data.get("data", {}).get("token")
         if not token:
-            raise HeyGenError(f"No token in response: {data}")
+            raise HeyGenError("create_token returned no token")
         return token
 
-    def new_session(
-        self,
-        session_token: str,
-        avatar_id: str,
-        voice_id: Optional[str] = None,
-        quality: str = "high",
-        version: str = "v2",
-        activity_idle_timeout: int = 120,
-    ) -> Dict[str, Any]:
+    def new_session(self, session_token, avatar_id, voice_id=None):
         url = f"{self.base_url}/v1/streaming.new"
-        payload: Dict[str, Any] = {
-            "quality": quality,
-            "version": version,
-            "activity_idle_timeout": activity_idle_timeout,
+        payload = {
+            "quality": "high",
+            "version": "v2",
+            "activity_idle_timeout": 120,
             "avatar_id": avatar_id,
         }
-
-        voice: Dict[str, Any] = {}
         if voice_id:
-            voice["voice_id"] = voice_id
-        if voice:
-            payload["voice"] = voice
+            payload["voice"] = {"voice_id": voice_id}
 
         r = requests.post(
             url,
@@ -98,33 +84,25 @@ class HeyGenStreamingClient:
         data = self._handle_response(r)
         if data.get("code") != 100:
             raise HeyGenError(f"new_session failed: {data}")
-        return data["data"]  # session_id, url, access_token
+        return data["data"]
 
-    def start_session(self, session_token: str, session_id: str) -> Dict[str, Any]:
+    def start_session(self, session_token, session_id):
         url = f"{self.base_url}/v1/streaming.start"
         payload = {"session_id": session_id}
         r = requests.post(
             url,
             headers=self._streaming_headers(session_token),
             data=json.dumps(payload),
-            timeout=15,
         )
         return self._handle_response(r)
 
-    def send_task(
-        self,
-        session_token: str,
-        session_id: str,
-        text: str,
-        task_type: str = "repeat",
-        task_mode: str = "async",
-    ) -> Dict[str, Any]:
+    def send_task(self, session_token, session_id, text):
         url = f"{self.base_url}/v1/streaming.task"
         payload = {
             "session_id": session_id,
             "text": text,
-            "task_type": task_type,  # "repeat" -> verbatim
-            "task_mode": task_mode,
+            "task_type": "repeat",
+            "task_mode": "async",
         }
         r = requests.post(
             url,
@@ -134,48 +112,99 @@ class HeyGenStreamingClient:
         )
         return self._handle_response(r)
 
-    def stop_session(self, session_token: str, session_id: str) -> Dict[str, Any]:
+    def stop_session(self, session_token, session_id):
         url = f"{self.base_url}/v1/streaming.stop"
         payload = {"session_id": session_id}
         r = requests.post(
             url,
             headers=self._streaming_headers(session_token),
             data=json.dumps(payload),
-            timeout=15,
         )
         return self._handle_response(r)
 
 
-# ------------------ FastAPI wiring ------------------
+# ============================================================
+#                     ENV + LANGUAGE MAP
+# ============================================================
 
 load_dotenv()
-HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
-DEFAULT_AVATAR_ID = os.getenv("AVATAR_ID")  # optional
-DEFAULT_VOICE_ID = os.getenv("VOICE_ID")    # optional
 
+HEYGEN_API_KEY = os.getenv("HEYGEN_API_KEY")
 if not HEYGEN_API_KEY:
-    raise RuntimeError("HEYGEN_API_KEY env var is required")
+    raise RuntimeError("HEYGEN_API_KEY is required")
+
+DEFAULT_LANG = (os.getenv("DEFAULT_LANG") or "en").lower()
+
+LANG_MAP = {
+    "fa": {
+        "avatar": os.getenv("FA_AVATAR_ID"),
+        "voice": os.getenv("FA_VOICE_ID"),
+    },
+    "en": {
+        "avatar": os.getenv("EN_AVATAR_ID"),
+        "voice": os.getenv("EN_VOICE_ID"),
+    },
+    "zh": {
+        "avatar": os.getenv("ZH_AVATAR_ID"),
+        "voice": os.getenv("ZH_VOICE_ID"),
+    },
+}
+
+# fallback defaults
+GLOBAL_AVATAR = os.getenv("AVATAR_ID")
+GLOBAL_VOICE = os.getenv("VOICE_ID")
 
 client = HeyGenStreamingClient(HEYGEN_API_KEY)
-
-# In-memory: session_id -> session_token
 sessions: Dict[str, str] = {}
+
+
+def resolve_avatar_and_voice(req_avatar, req_voice):
+    """
+    Priority:
+    1) Request override
+    2) Language-based mapping
+    3) Global defaults
+    4) Auto-pick first avatar from API
+    """
+
+    # 1: Request override
+    if req_avatar:
+        avatar_id = req_avatar
+    else:
+        avatar_id = LANG_MAP.get(DEFAULT_LANG, {}).get("avatar") or GLOBAL_AVATAR
+
+    if req_voice:
+        voice_id = req_voice
+    else:
+        voice_id = LANG_MAP.get(DEFAULT_LANG, {}).get("voice") or GLOBAL_VOICE
+
+    # 4: No avatar → pick first
+    if not avatar_id:
+        avatars = client.list_streaming_avatars()
+        if not avatars:
+            raise HeyGenError("No streaming avatars available")
+        avatar_id = avatars[0].get("avatar_id") or avatars[0].get("id")
+
+    return avatar_id, voice_id
+
+
+# ============================================================
+#                  FASTAPI SETUP
+# ============================================================
 
 app = FastAPI()
 
-# CORS for React dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- Schemas ----------
+
+# ============================================================
+#                      SCHEMAS
+# ============================================================
 
 class CreateSessionRequest(BaseModel):
     avatar_id: Optional[str] = None
@@ -197,26 +226,16 @@ class StopRequest(BaseModel):
     session_id: str
 
 
-# ---------- Endpoints ----------
+# ============================================================
+#                      ENDPOINTS
+# ============================================================
 
 @app.post("/api/avatar/session", response_model=CreateSessionResponse)
 def create_session(req: CreateSessionRequest):
     try:
-        avatar_id = req.avatar_id or DEFAULT_AVATAR_ID
-        if not avatar_id:
-            # pick first streaming avatar as fallback
-            avatars = client.list_streaming_avatars()
-            if not avatars:
-                raise HeyGenError("No streaming avatars available")
-            first = avatars[0]
-            avatar_id = first.get("avatar_id") or first.get("id")
+        avatar_id, voice_id = resolve_avatar_and_voice(req.avatar_id, req.voice_id)
 
-        voice_id = req.voice_id or DEFAULT_VOICE_ID
-
-        # 1) per-session token
         session_token = client.create_session_token()
-
-        # 2) new streaming session
         session_info = client.new_session(
             session_token=session_token,
             avatar_id=avatar_id,
@@ -224,10 +243,7 @@ def create_session(req: CreateSessionRequest):
         )
         session_id = session_info["session_id"]
 
-        # 3) start streaming
         client.start_session(session_token, session_id)
-
-        # 4) store token for later
         sessions[session_id] = session_token
 
         return CreateSessionResponse(
@@ -246,18 +262,12 @@ def talk(req: TalkRequest):
     if not session_token:
         raise HTTPException(status_code=404, detail="Unknown session_id")
 
-    if not req.text:
-        raise HTTPException(status_code=400, detail="text is required")
-
     try:
-        resp = client.send_task(
+        return client.send_task(
             session_token=session_token,
             session_id=req.session_id,
             text=req.text,
-            task_type="repeat",  # verbatim
-            task_mode="async",
         )
-        return resp
     except HeyGenError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -270,9 +280,6 @@ def stop(req: StopRequest):
 
     try:
         resp = client.stop_session(session_token, req.session_id)
-    except HeyGenError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return resp
     finally:
         sessions.pop(req.session_id, None)
-
-    return resp
