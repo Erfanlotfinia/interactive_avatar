@@ -1,12 +1,15 @@
 import os
 import json
 import logging
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 HEYGEN_BASE_URL = "https://api.heygen.com"
@@ -304,6 +307,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    logger.info("Serving React frontend from %s", FRONTEND_DIST)
+    app.mount("/web", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_frontend_root():
+        return RedirectResponse(url="/web/")
+else:
+    logger.warning(
+        "React build not found at %s. Run 'npm install && npm run build' inside frontend/.",
+        FRONTEND_DIST,
+    )
+
+    @app.get("/", include_in_schema=False)
+    async def frontend_missing():
+        return {
+            "detail": "React build not found. Run 'npm install && npm run build' inside frontend/ to enable the UI.",
+            "expected_path": str(FRONTEND_DIST),
+        }
 
 # ============================================================
 #                      SCHEMAS
